@@ -3,7 +3,7 @@ mod hid_device_channel;
 mod record;
 
 use crate::audio::AudioManager;
-use crate::hid_device_channel::HidDeviceChannel;
+use crate::hid_device_channel::{HidDeviceChannel, WriteError};
 use hidapi::HidError;
 use record::*;
 use std::fmt::Debug;
@@ -136,47 +136,80 @@ impl VolumeManager {
     }
 }
 
-struct Application {
-    volume_manager: VolumeManager,
+trait ApplicationState {}
+struct Connected {
     device: HidDeviceChannel,
-    device_params: (u16, u16, u16, u16),
+}
+struct Disconnected {
+    error: Option<AppError>,
 }
 
-impl Application {
-    pub fn new() -> Result<Self, HidError> {
-        let device_params = (0x3434, 0x661, 0xFF60, 0x61);
-        let (vendor_id, product_id, usage_page, usage) = device_params;
+impl Default for Disconnected {
+    fn default() -> Self {
+        Self { error: None }
+    }
+}
 
-        Ok(Self {
+impl ApplicationState for Connected {}
+impl ApplicationState for Disconnected {}
+
+#[derive(Debug)]
+enum AppError {
+    Write(WriteError),
+    Connect(HidError),
+}
+
+impl Application<Disconnected> {
+    pub fn new() -> Application<Disconnected> {
+        Application::<Disconnected> {
             volume_manager: Default::default(),
-            device: HidDeviceChannel::connect(vendor_id, product_id, usage_page, usage)?,
-            device_params,
-        })
+            state: Default::default(),
+        }
     }
 
-    pub fn reconnect(self) -> Result<Self, HidError> {
-        let device_params = self.device_params;
-        let (vendor_id, product_id, usage_page, usage) = device_params;
-        Ok(Self {
-            volume_manager: self.volume_manager,
-            device_params: self.device_params,
-            device: HidDeviceChannel::connect(vendor_id, product_id, usage_page, usage)?,
-        })
+    pub fn connect(
+        self,
+        vendor_id: u16,
+        product_id: u16,
+        usage_page: u16,
+        usage: u16,
+    ) -> Result<Application<Connected>, Application<Disconnected>> {
+        match HidDeviceChannel::connect(vendor_id, product_id, usage_page, usage) {
+            Ok(device) => Ok(Application::<Connected> {
+                volume_manager: self.volume_manager,
+                state: { Connected { device } },
+            }),
+            Err(error) => Err(Application::<Disconnected> {
+                volume_manager: self.volume_manager,
+                state: Disconnected {
+                    error: Some(AppError::Connect(error)),
+                },
+            }),
+        }
     }
+}
 
+struct Application<S: ApplicationState = Disconnected> {
+    volume_manager: VolumeManager,
+    state: S,
+}
+
+impl Application<Connected> {
     fn process_record(&mut self, record: &Record) {
         println!("DATA!: {:?}", record);
 
         match record.data {
             RecordData::Pong => {
-                self.device
+                self.state
+                    .device
                     .write_record(Record::new(record.serial + 1, RecordData::BatteryRequest))
                     .expect("Failed to write battery request");
                 self.volume_manager
                     .get_mute(Some(eRender), Some(eMultimedia))
                     .and_then(|state| {
                         Some(
-                            self.device
+                            self.state
+                                .device
                                 .write_record(Record::new(
                                     record.serial + 2,
                                     RecordData::SetOutputMuteState(state),
@@ -188,7 +221,8 @@ impl Application {
                     .get_mute(Some(eCapture), Some(eCommunications))
                     .and_then(|state| {
                         Some(
-                            self.device
+                            self.state
+                                .device
                                 .write_record(Record::new(
                                     record.serial + 3,
                                     RecordData::SetInputMuteState(state),
@@ -198,7 +232,8 @@ impl Application {
                     });
             }
             RecordData::BatteryResponse { percent, .. } => {
-                self.device
+                self.state
+                    .device
                     .write_record(Record::new(
                         record.serial + 1,
                         RecordData::SetLedMeter {
@@ -227,7 +262,8 @@ impl Application {
         match new_vol {
             None => {}
             Some(vol) => {
-                self.device
+                self.state
+                    .device
                     .write_record(Record::new(
                         123,
                         RecordData::SetLedMeter {
@@ -245,7 +281,8 @@ impl Application {
         match new_mute {
             None => {}
             Some(mute) => {
-                self.device
+                self.state
+                    .device
                     .write_record(Record::new(456, RecordData::SetOutputMuteState(mute)))
                     .expect("Failed to send new output mute value");
             }
@@ -254,7 +291,8 @@ impl Application {
         match new_mic_mute {
             None => {}
             Some(mute) => {
-                self.device
+                self.state
+                    .device
                     .write_record(Record::new(789, RecordData::SetInputMuteState(mute)))
                     .expect("Failed to send new mic mute value");
             }
@@ -265,7 +303,7 @@ impl Application {
         loop {
             self.before_read();
 
-            let response = match self.device.read_record(Some(100)) {
+            let response = match self.state.device.read_record(Some(100)) {
                 Ok(res) => res,
                 Err(err) => {
                     eprintln!("Error!: {:?}", err);
@@ -281,14 +319,12 @@ impl Application {
         }
     }
 
-    fn run(&mut self) {
-        let mut retry = 0;
+    fn run(mut self) -> Application<Disconnected> {
         loop {
-            if retry > 100 {
-                return;
-            }
-
-            let result = self.device.write_record(Record::new(0, RecordData::Ping));
+            let result = self
+                .state
+                .device
+                .write_record(Record::new(0, RecordData::Ping));
 
             match result {
                 Ok(size) => {
@@ -297,9 +333,13 @@ impl Application {
                     self.listen_for_data();
                 }
                 Err(err) => {
-                    retry += 1;
                     eprintln!("Error during write: {err:?}");
-                    sleep(Duration::from_millis(1000));
+                    return Application::<Disconnected> {
+                        volume_manager: self.volume_manager,
+                        state: Disconnected {
+                            error: Some(AppError::Write(err)),
+                        },
+                    };
                 }
             }
         }
@@ -309,23 +349,19 @@ impl Application {
 fn main() -> ExitCode {
     let mut retry = 0;
     let mut application = Application::new();
-
     loop {
-        match application {
-            Ok(mut app) => {
-                app.run();
-                application = app.reconnect();
-            }
+        application = match application.connect(0x3434, 0x661, 0xFF60, 0x61) {
+            Ok(app) => app.run(),
             Err(e) => {
                 retry += 1;
-                eprintln!("Error during connect: {e:?}");
+                eprintln!("Error during connect: {:?}", e.state.error);
 
                 if retry > 100 {
                     return ExitCode::FAILURE;
                 }
                 sleep(Duration::from_millis(100));
 
-                application = Application::new();
+                e
             }
         }
     }
