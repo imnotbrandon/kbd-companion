@@ -1,6 +1,6 @@
 use bincode::{Decode, Encode};
 
-#[derive(Encode, Decode, PartialEq, Debug)]
+#[derive(Encode, Decode, PartialEq, Debug, Copy, Clone)]
 #[repr(C)]
 pub(crate) struct Record {
     pub(crate) serial: u32,
@@ -13,7 +13,7 @@ impl Record {
     }
 }
 
-#[derive(Encode, Decode, PartialEq, Debug)]
+#[derive(Encode, Decode, PartialEq, Debug, Copy, Clone)]
 pub(crate) enum RecordData {
     Empty,
     Ping,

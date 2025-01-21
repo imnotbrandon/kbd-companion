@@ -1,13 +1,18 @@
 mod audio;
+mod gui;
 mod hid_device_channel;
 mod record;
 
 use crate::audio::AudioManager;
+use crate::gui::init_gui;
 use crate::hid_device_channel::{HidDeviceChannel, WriteError};
+use hid_device_channel::WriteResult;
 use hidapi::HidError;
 use record::*;
 use std::fmt::Debug;
 use std::process::ExitCode;
+use std::sync::mpsc;
+use std::sync::mpsc::{Receiver, SendError, Sender, TryRecvError};
 use std::thread::sleep;
 use std::time::Duration;
 use windows::Win32::Media::Audio::{
@@ -160,10 +165,12 @@ enum AppError {
 }
 
 impl Application<Disconnected> {
-    pub fn new() -> Application<Disconnected> {
+    pub fn new(tx: Sender<Record>, rx: Receiver<Record>) -> Application<Disconnected> {
         Application::<Disconnected> {
             volume_manager: Default::default(),
             state: Default::default(),
+            tx,
+            rx,
         }
     }
 
@@ -178,12 +185,16 @@ impl Application<Disconnected> {
             Ok(device) => Ok(Application::<Connected> {
                 volume_manager: self.volume_manager,
                 state: { Connected { device } },
+                tx: self.tx,
+                rx: self.rx,
             }),
             Err(error) => Err(Application::<Disconnected> {
                 volume_manager: self.volume_manager,
                 state: Disconnected {
                     error: Some(AppError::Connect(error)),
                 },
+                tx: self.tx,
+                rx: self.rx,
             }),
         }
     }
@@ -192,11 +203,16 @@ impl Application<Disconnected> {
 struct Application<S: ApplicationState = Disconnected> {
     volume_manager: VolumeManager,
     state: S,
+    tx: Sender<Record>,
+    rx: Receiver<Record>,
 }
 
 impl Application<Connected> {
     fn process_record(&mut self, record: &Record) {
         println!("DATA!: {:?}", record);
+        self.tx
+            .send(record.clone())
+            .expect("Failed to send record to gui");
 
         match record.data {
             RecordData::Pong => {
@@ -206,16 +222,13 @@ impl Application<Connected> {
                     .expect("Failed to write battery request");
                 self.volume_manager
                     .get_mute(Some(eRender), Some(eMultimedia))
-                    .and_then(|state| {
-                        Some(
-                            self.state
-                                .device
-                                .write_record(Record::new(
-                                    record.serial + 2,
-                                    RecordData::SetOutputMuteState(state),
-                                ))
-                                .expect("Failed to write data"),
-                        )
+                    .inspect(|state| {
+                        let (hid, gui) = self.send_record(Record::new(
+                            record.serial + 2,
+                            RecordData::SetOutputMuteState(*state),
+                        ));
+                        hid.expect("Failed to send record to device");
+                        gui.expect("Failed to send record to gui");
                     });
                 self.volume_manager
                     .get_mute(Some(eCapture), Some(eCommunications))
@@ -232,25 +245,31 @@ impl Application<Connected> {
                     });
             }
             RecordData::BatteryResponse { percent, .. } => {
-                self.state
-                    .device
-                    .write_record(Record::new(
-                        record.serial + 1,
-                        RecordData::SetLedMeter {
-                            percent,
-                            danger_threshold: 2,
-                            warning_threshold: 6,
-                            invert: false,
-                            linger_time: 1000,
-                        },
-                    ))
-                    .expect("ok");
+                let (hid, gui) = self.send_record(Record::new(
+                    record.serial + 1,
+                    RecordData::SetLedMeter {
+                        percent,
+                        danger_threshold: 2,
+                        warning_threshold: 6,
+                        invert: false,
+                        linger_time: 1000,
+                    },
+                ));
+                hid.expect("Failed to send record to device");
+                gui.expect("Failed to send record to gui");
             }
             RecordData::ToggleInputMute => {
                 self.volume_manager.toggle_mic_mute();
             }
             _ => {}
         }
+    }
+
+    fn send_record(&self, record: Record) -> (WriteResult, Result<(), SendError<Record>>) {
+        (
+            self.state.device.write_record(record),
+            self.tx.send(record.clone()),
+        )
     }
 
     pub fn before_read(&mut self) {
@@ -262,29 +281,34 @@ impl Application<Connected> {
         match new_vol {
             None => {}
             Some(vol) => {
+                let led_meter_record = Record::new(
+                    123,
+                    RecordData::SetLedMeter {
+                        percent: vol,
+                        warning_threshold: 0,
+                        danger_threshold: 0,
+                        invert: false,
+                        linger_time: 1000,
+                    },
+                );
                 self.state
                     .device
-                    .write_record(Record::new(
-                        123,
-                        RecordData::SetLedMeter {
-                            percent: vol,
-                            warning_threshold: 0,
-                            danger_threshold: 0,
-                            invert: false,
-                            linger_time: 1000,
-                        },
-                    ))
+                    .write_record(led_meter_record)
                     .expect("TODO: panic message");
+
+                self.tx
+                    .send(led_meter_record.clone())
+                    .expect("Failed to send record to gui");
             }
         }
 
         match new_mute {
             None => {}
             Some(mute) => {
-                self.state
-                    .device
-                    .write_record(Record::new(456, RecordData::SetOutputMuteState(mute)))
-                    .expect("Failed to send new output mute value");
+                let (hid, gui) =
+                    self.send_record(Record::new(456, RecordData::SetOutputMuteState(mute)));
+                hid.expect("Failed to send new output mute value to device");
+                gui.expect("Failed to send new output mute value to gui");
             }
         }
 
@@ -316,6 +340,16 @@ impl Application<Connected> {
                 Some(res) => self.process_record(&res),
                 None => {}
             }
+
+            match self.rx.try_recv() {
+                Ok(record) => {
+                    self.send_record(record);
+                }
+                Err(TryRecvError::Disconnected) => {
+                    panic!("GUI receive channel disconnected")
+                }
+                _ => {} // No data
+            }
         }
     }
 
@@ -339,6 +373,8 @@ impl Application<Connected> {
                         state: Disconnected {
                             error: Some(AppError::Write(err)),
                         },
+                        tx: self.tx,
+                        rx: self.rx,
                     };
                 }
             }
@@ -347,22 +383,34 @@ impl Application<Connected> {
 }
 
 fn main() -> ExitCode {
-    let mut retry = 0;
-    let mut application = Application::new();
-    loop {
-        application = match application.connect(0x3434, 0x661, 0xFF60, 0x61) {
-            Ok(app) => app.run(),
-            Err(e) => {
-                retry += 1;
-                eprintln!("Error during connect: {:?}", e.state.error);
+    // Sending data to GUI
+    let (gui_tx, gui_rx) = mpsc::channel();
+    // Sending data to USB
+    let (usb_tx, usb_rx) = mpsc::channel();
 
-                if retry > 100 {
-                    return ExitCode::FAILURE;
+    let thread = std::thread::spawn(move || {
+        let mut retry = 0;
+        let mut application = Application::new(gui_tx, usb_rx);
+
+        loop {
+            application = match application.connect(0x3434, 0x661, 0xFF60, 0x61) {
+                Ok(app) => app.run(),
+                Err(e) => {
+                    retry += 1;
+                    eprintln!("Error during connect: {:?}", e.state.error);
+
+                    if retry > 100 {
+                        return ExitCode::FAILURE;
+                    }
+                    sleep(Duration::from_millis(100));
+
+                    e
                 }
-                sleep(Duration::from_millis(100));
-
-                e
             }
         }
-    }
+    });
+
+    init_gui(gui_rx, usb_tx).expect("wat");
+
+    thread.join().expect("comms thread crashed")
 }

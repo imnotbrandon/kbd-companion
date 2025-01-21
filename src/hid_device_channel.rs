@@ -15,7 +15,7 @@ pub enum WriteError {
     Hid(HidError),
 }
 
-type WriteResult = Result<usize, WriteError>;
+pub(crate) type WriteResult = Result<usize, WriteError>;
 
 #[derive(Debug)]
 pub enum ReadError {
