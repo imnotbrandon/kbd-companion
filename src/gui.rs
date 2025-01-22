@@ -2,11 +2,12 @@
 #![allow(rustdoc::missing_crate_level_docs)] // it's an example
 
 use crate::record::{Record, RecordData};
+use crate::Event;
 use eframe::egui;
 use eframe::egui::{ProgressBar, Rgba, Slider};
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 
-pub fn init_gui(rx: Receiver<Record>, tx: Sender<Record>) -> eframe::Result {
+pub fn init_gui(rx: Receiver<Event>, tx: Sender<Event>) -> eframe::Result {
     env_logger::init(); // Log to stderr (if you run with `RUST_LOG=debug`).
 
     let options = eframe::NativeOptions {
@@ -16,19 +17,25 @@ pub fn init_gui(rx: Receiver<Record>, tx: Sender<Record>) -> eframe::Result {
         ..Default::default()
     };
 
+    // TODO: refactor into state struct
     let mut bat_pc = 0;
     let mut set_bat_pc = 0;
     let mut led_meter_pc = 0;
     let mut muted = false;
+
     eframe::run_simple_native("Keyboard Companion", options, move |ctx, _frame| {
+        // TODO: Refactor into function
         match rx.try_recv() {
-            Ok(rec) => match rec.data {
+            Ok(Event::RecordFromDevice(rec)) => match rec.data {
                 RecordData::BatteryResponse { percent, .. } => bat_pc = percent,
+                _ => {}
+            },
+            Ok(Event::RecordToDevice(rec)) => match rec.data {
                 RecordData::SetOutputMuteState(state) => muted = state,
                 RecordData::SetLedMeter { percent, .. } => led_meter_pc = percent,
                 _ => {}
             },
-            Err(_) => {}
+            _ => {}
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -67,7 +74,7 @@ pub fn init_gui(rx: Receiver<Record>, tx: Sender<Record>) -> eframe::Result {
                         ui.add(Slider::new(&mut set_bat_pc, 0..=100));
                         let btn = ui.button("Illuminate battery %");
                         if btn.clicked() {
-                            tx.send(Record::new(
+                            tx.send(Event::RecordToDevice(Record::new(
                                 456,
                                 RecordData::SetLedMeter {
                                     percent: set_bat_pc,
@@ -76,7 +83,7 @@ pub fn init_gui(rx: Receiver<Record>, tx: Sender<Record>) -> eframe::Result {
                                     danger_threshold: 2,
                                     warning_threshold: 7,
                                 },
-                            ))
+                            )))
                             .expect("Failed to send Illuminate");
                         }
                     })

@@ -165,7 +165,7 @@ enum AppError {
 }
 
 impl Application<Disconnected> {
-    pub fn new(tx: Sender<Record>, rx: Receiver<Record>) -> Application<Disconnected> {
+    pub fn new(tx: Sender<Event>, rx: Receiver<Event>) -> Application<Disconnected> {
         Application::<Disconnected> {
             volume_manager: Default::default(),
             state: Default::default(),
@@ -203,23 +203,17 @@ impl Application<Disconnected> {
 struct Application<S: ApplicationState = Disconnected> {
     volume_manager: VolumeManager,
     state: S,
-    tx: Sender<Record>,
-    rx: Receiver<Record>,
+    tx: Sender<Event>,
+    rx: Receiver<Event>,
 }
 
 impl Application<Connected> {
     fn process_record(&mut self, record: &Record) {
         println!("DATA!: {:?}", record);
-        self.tx
-            .send(record.clone())
-            .expect("Failed to send record to gui");
 
         match record.data {
             RecordData::Pong => {
-                self.state
-                    .device
-                    .write_record(Record::new(record.serial + 1, RecordData::BatteryRequest))
-                    .expect("Failed to write battery request");
+                self.send_record(Record::new(record.serial + 1, RecordData::BatteryRequest));
                 self.volume_manager
                     .get_mute(Some(eRender), Some(eMultimedia))
                     .inspect(|state| {
@@ -233,15 +227,10 @@ impl Application<Connected> {
                 self.volume_manager
                     .get_mute(Some(eCapture), Some(eCommunications))
                     .and_then(|state| {
-                        Some(
-                            self.state
-                                .device
-                                .write_record(Record::new(
-                                    record.serial + 3,
-                                    RecordData::SetInputMuteState(state),
-                                ))
-                                .expect("Failed to write data"),
-                        )
+                        Some(self.send_record(Record::new(
+                            record.serial + 3,
+                            RecordData::SetInputMuteState(state),
+                        )))
                     });
             }
             RecordData::BatteryResponse { percent, .. } => {
@@ -265,10 +254,10 @@ impl Application<Connected> {
         }
     }
 
-    fn send_record(&self, record: Record) -> (WriteResult, Result<(), SendError<Record>>) {
+    fn send_record(&self, record: Record) -> (WriteResult, Result<(), SendError<Event>>) {
         (
             self.state.device.write_record(record),
-            self.tx.send(record.clone()),
+            self.tx.send(Event::RecordToDevice(record.clone())),
         )
     }
 
@@ -291,14 +280,8 @@ impl Application<Connected> {
                         linger_time: 1000,
                     },
                 );
-                self.state
-                    .device
-                    .write_record(led_meter_record)
-                    .expect("TODO: panic message");
 
-                self.tx
-                    .send(led_meter_record.clone())
-                    .expect("Failed to send record to gui");
+                self.send_record(led_meter_record);
             }
         }
 
@@ -315,10 +298,7 @@ impl Application<Connected> {
         match new_mic_mute {
             None => {}
             Some(mute) => {
-                self.state
-                    .device
-                    .write_record(Record::new(789, RecordData::SetInputMuteState(mute)))
-                    .expect("Failed to send new mic mute value");
+                self.send_record(Record::new(789, RecordData::SetInputMuteState(mute)));
             }
         }
     }
@@ -327,7 +307,7 @@ impl Application<Connected> {
         loop {
             self.before_read();
 
-            let response = match self.state.device.read_record(Some(100)) {
+            let response = match self.state.device.read_record(Some(10)) {
                 Ok(res) => res,
                 Err(err) => {
                     eprintln!("Error!: {:?}", err);
@@ -337,18 +317,23 @@ impl Application<Connected> {
             };
 
             match response {
-                Some(res) => self.process_record(&res),
+                Some(res) => {
+                    self.tx
+                        .send(Event::RecordFromDevice(res.clone()))
+                        .expect("Failed to send record to gui");
+                    self.process_record(&res);
+                }
                 None => {}
             }
 
             match self.rx.try_recv() {
-                Ok(record) => {
+                Ok(Event::RecordToDevice(record)) => {
                     self.send_record(record);
                 }
                 Err(TryRecvError::Disconnected) => {
                     panic!("GUI receive channel disconnected")
                 }
-                _ => {} // No data
+                _ => {} // No data or not interested
             }
         }
     }
@@ -380,6 +365,13 @@ impl Application<Connected> {
             }
         }
     }
+}
+
+pub(crate) enum Event {
+    DeviceConnected,
+    DeviceDisconnected,
+    RecordFromDevice(Record),
+    RecordToDevice(Record),
 }
 
 fn main() -> ExitCode {
