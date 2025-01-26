@@ -2,10 +2,12 @@ mod audio;
 mod gui;
 mod hid_device_channel;
 mod record;
+mod steelseries;
 
 use crate::audio::AudioManager;
 use crate::gui::init_gui;
 use crate::hid_device_channel::{HidDeviceChannel, WriteError};
+use crate::steelseries::SteelSeriesEngineClient;
 use hid_device_channel::WriteResult;
 use hidapi::HidError;
 use record::*;
@@ -15,6 +17,7 @@ use std::sync::mpsc;
 use std::sync::mpsc::{Receiver, SendError, Sender, TryRecvError};
 use std::thread::sleep;
 use std::time::Duration;
+use tokio::sync::mpsc::UnboundedReceiver;
 use windows::Win32::Media::Audio::{
     eCapture, eCommunications, eMultimedia, eRender, EDataFlow, ERole,
 };
@@ -125,7 +128,7 @@ impl VolumeManager {
         let curr_mute = self.curr_mic_mute.unwrap_or_else(|| {
             self.refresh()
                 .curr_mic_mute
-                .expect("Failed to refresh mic mute state")
+                .expect("Failed to refresh Mic mute state")
         });
 
         self.set_mic_mute(!curr_mute)
@@ -330,9 +333,7 @@ impl Application<Connected> {
                 Ok(Event::RecordToDevice(record)) => {
                     self.send_record(record);
                 }
-                Err(TryRecvError::Disconnected) => {
-                    panic!("GUI receive channel disconnected")
-                }
+                Err(TryRecvError::Disconnected) => return,
                 _ => {} // No data or not interested
             }
         }
@@ -367,11 +368,73 @@ impl Application<Connected> {
     }
 }
 
+#[derive(Debug)]
+pub(crate) enum SonarRequest {
+    FetchDevices {
+        remove_steelseries_vad: Option<bool>,
+    },
+    FetchClassicRedirections,
+}
+
+#[derive(Debug)]
+pub(crate) enum SonarResponse {
+    FetchDevices(Vec<steelseries::api::sonar::types::AudioDevice>),
+    FetchClassicRedirections(Vec<steelseries::api::sonar::types::ClassicRedirection>),
+}
+
+#[derive(Debug)]
 pub(crate) enum Event {
     DeviceConnected,
     DeviceDisconnected,
     RecordFromDevice(Record),
     RecordToDevice(Record),
+    SonarRequest(SonarRequest),
+    SonarResponse(SonarResponse),
+}
+
+async fn ss_comms(mut rx: UnboundedReceiver<Event>, gui_tx: Sender<Event>) {
+    let engine_client = SteelSeriesEngineClient::new_autodetect();
+    let new_client = crate::steelseries::api::sonar::Client::new(
+        engine_client
+            .get_subapp_url("sonar")
+            .await
+            .expect("Couldn't get sonar URL")
+            .as_str(),
+    );
+
+    loop {
+        let event = rx.recv().await;
+        println!("Got event: {event:?}");
+        let response = match event {
+            Some(Event::SonarRequest(request)) => match request {
+                SonarRequest::FetchDevices {
+                    remove_steelseries_vad,
+                } => Some(SonarResponse::FetchDevices(
+                    new_client
+                        .list_audio_devices(None, None, remove_steelseries_vad)
+                        .await
+                        .expect("idk")
+                        .to_owned(),
+                )),
+                SonarRequest::FetchClassicRedirections => {
+                    Some(SonarResponse::FetchClassicRedirections(
+                        new_client
+                            .list_classic_redirections()
+                            .await
+                            .expect("idk")
+                            .to_owned(),
+                    ))
+                }
+            },
+            _ => return,
+        };
+
+        if let Some(response) = response {
+            gui_tx
+                .send(Event::SonarResponse(response))
+                .expect("Failed to send response");
+        }
+    }
 }
 
 fn main() -> ExitCode {
@@ -379,10 +442,12 @@ fn main() -> ExitCode {
     let (gui_tx, gui_rx) = mpsc::channel();
     // Sending data to USB
     let (usb_tx, usb_rx) = mpsc::channel();
+    let (ss_tx, ss_rx) = tokio::sync::mpsc::unbounded_channel();
 
+    let gui_tx_for_kbd = gui_tx.clone();
     let thread = std::thread::spawn(move || {
         let mut retry = 0;
-        let mut application = Application::new(gui_tx, usb_rx);
+        let mut application = Application::new(gui_tx_for_kbd, usb_rx);
 
         loop {
             application = match application.connect(0x3434, 0x661, 0xFF60, 0x61) {
@@ -402,7 +467,15 @@ fn main() -> ExitCode {
         }
     });
 
-    init_gui(gui_rx, usb_tx).expect("wat");
+    let thread2 = std::thread::spawn(move || {
+        let tokio = tokio::runtime::Runtime::new().unwrap();
+        tokio.block_on(ss_comms(ss_rx, gui_tx));
+    });
 
-    thread.join().expect("comms thread crashed")
+    init_gui(gui_rx, usb_tx, ss_tx).expect("wat");
+
+    thread2.join().unwrap();
+    thread.join().unwrap();
+
+    ExitCode::SUCCESS
 }
