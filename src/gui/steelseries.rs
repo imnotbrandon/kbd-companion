@@ -1,13 +1,7 @@
 use crate::{
-    gui::View,
-    steelseries::api::sonar,
-    steelseries::api::sonar::types::DeviceRole,
+    gui::View, steelseries::api::sonar, steelseries::api::sonar::types::DeviceRole,
     steelseries::api::sonar::types::RedirectionId,
-    steelseries::api::sonar::types::RedirectionVolumes
-    ,
-    Event,
-    SonarRequest,
-    SonarResponse
+    steelseries::api::sonar::types::RedirectionVolumes, Event, SonarRequest, SonarResponse,
 };
 use eframe::egui;
 use eframe::egui::ComboBox;
@@ -167,7 +161,7 @@ impl View for SonarView {
                 self.redirections = redirections.clone();
                 println!("Got classic redirections: {:?}", self.redirections);
             }
-            Event::SonarResponse((SonarResponse::FetchDeviceVolume(response))) => {
+            Event::SonarResponse(SonarResponse::FetchDeviceVolume(response)) => {
                 println!("Got sonar device volume: {:?}", response);
                 let devices = response.clone().devices.unwrap();
                 self.vad_volume = devices

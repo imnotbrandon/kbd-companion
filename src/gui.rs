@@ -2,13 +2,12 @@
 
 use crate::gui::keyboard::KeyboardView;
 use crate::gui::steelseries::SonarView;
-use crate::record::{Record, RecordData};
 use crate::Event;
 use eframe::egui;
-use eframe::egui::{Button, ProgressBar, Rgba, Slider};
+use eframe::egui::Button;
 use std::cmp::PartialEq;
 use std::default::Default;
-use std::sync::mpsc::{Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{Receiver, Sender};
 use tokio::sync::mpsc::UnboundedSender;
 
 mod keyboard;

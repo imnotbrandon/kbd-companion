@@ -2,7 +2,7 @@ use crate::gui::View;
 use crate::record::{Record, RecordData};
 use crate::Event;
 use eframe::egui::{ProgressBar, Rgba, Slider, Ui};
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::Sender;
 
 pub(super) struct KeyboardView {
     bat_pc: u8,
