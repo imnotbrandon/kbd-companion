@@ -1,23 +1,35 @@
-use crate::gui::View;
-use crate::steelseries::api::sonar;
-use crate::steelseries::api::sonar::types::{
-    DeviceRole, RedirectionId, RedirectionVolumes, VolumeSettings,
+use crate::{
+    gui::View,
+    steelseries::api::sonar,
+    steelseries::api::sonar::types::DeviceRole,
+    steelseries::api::sonar::types::RedirectionId,
+    steelseries::api::sonar::types::RedirectionVolumes
+    ,
+    Event,
+    SonarRequest,
+    SonarResponse
 };
-use crate::{Event, SonarRequest, SonarResponse};
 use eframe::egui;
 use eframe::egui::ComboBox;
 use std::collections::HashMap;
 use tokio::sync::mpsc::error::SendError;
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::UnboundedSender;
 
 pub type AudioDevice = sonar::types::AudioDevice;
 pub type ClassicRedirection = sonar::types::ClassicRedirection;
+
+struct ChannelState {
+    is_muted: bool,
+    volume: f32,
+    device: String,
+}
 
 pub(super) struct SonarView {
     audio_devices: Vec<AudioDevice>,
     redirections: Vec<ClassicRedirection>,
     channel_tx: UnboundedSender<Event>,
     vad_volume: HashMap<DeviceRole, RedirectionVolumes>,
+    sonar_url: String,
 }
 
 impl SonarView {
@@ -27,11 +39,16 @@ impl SonarView {
             redirections: Vec::new(),
             channel_tx,
             vad_volume: HashMap::new(),
+            sonar_url: String::new(),
         }
     }
 
-    fn redirect_device(&self, redirection: &RedirectionId, device: &String) -> ClassicRedirection {
-        todo!("implement");
+    fn redirect_device(&mut self, redirection: &RedirectionId, device: &String) {
+        self.sonar_request(SonarRequest::RedirectDevice {
+            redirection: redirection.clone(),
+            device: device.clone(),
+        })
+        .expect("failed to redirect device");
     }
 
     fn fetch_volume(&mut self) -> Result<(), SendError<Event>> {
@@ -53,11 +70,14 @@ impl View for SonarView {
         });
         self.sonar_request(SonarRequest::FetchClassicRedirections);
         self.fetch_volume().expect("Failed to fetch volume");
+        self.sonar_request(SonarRequest::GetSonarUrl)
+            .expect("Failed to get SonarUrl");
     }
 
     fn render(&mut self, ui: &mut egui::Ui) {
         let addr_label = ui.label("Sonar server address:".to_string());
-        ui.hyperlink(format!("{}", "")).labelled_by(addr_label.id);
+        ui.hyperlink(format!("{}", self.sonar_url))
+            .labelled_by(addr_label.id);
 
         let device_list = &self.audio_devices;
         let vad_volume = &self.vad_volume;
@@ -78,6 +98,7 @@ impl View for SonarView {
                     } else {
                         return;
                     };
+                    let redirection_dataflow = redirection.get_dataflow();
 
                     ui.heading(&redirection.to_string());
                     ui.horizontal(|ui| {
@@ -86,13 +107,18 @@ impl View for SonarView {
                             .wrap()
                             .selected_text(device_name.to_string())
                             .show_ui(ui, |ui| {
-                                self.audio_devices.iter().for_each(|device| {
-                                    ui.selectable_value(
-                                        &mut redirection.device_id,
-                                        Some(device.id.as_ref().unwrap().clone()),
-                                        device.friendly_name.as_ref().expect("idk"),
-                                    );
-                                })
+                                self.audio_devices
+                                    .iter()
+                                    .filter(|d| {
+                                        d.data_flow.is_some_and(|f| f == redirection_dataflow)
+                                    })
+                                    .for_each(|device| {
+                                        ui.selectable_value(
+                                            &mut redirection.device_id,
+                                            Some(device.id.as_ref().unwrap().clone()),
+                                            device.friendly_name.as_ref().expect("idk"),
+                                        );
+                                    })
                             });
                     });
                     ui.horizontal(|ui| {
@@ -108,7 +134,7 @@ impl View for SonarView {
                                         .unwrap()
                                         .volume
                                         .expect("missing volume")
-                                        * 100f32
+                                        * 100.0
                                 ));
                             }
                         }
@@ -139,7 +165,7 @@ impl View for SonarView {
             }
             Event::SonarResponse(SonarResponse::FetchClassicRedirections(redirections)) => {
                 self.redirections = redirections.clone();
-                println!("Got sonar device list: {:?}", self.audio_devices);
+                println!("Got classic redirections: {:?}", self.redirections);
             }
             Event::SonarResponse((SonarResponse::FetchDeviceVolume(response))) => {
                 println!("Got sonar device volume: {:?}", response);
@@ -148,6 +174,9 @@ impl View for SonarView {
                     .into_iter()
                     .map(|(k, v)| (DeviceRole::try_from(k).expect("invalid channel"), v))
                     .collect();
+            }
+            Event::SonarResponse(SonarResponse::GetSonarUrl(url)) => {
+                self.sonar_url = url.clone();
             }
             _ => {}
         }

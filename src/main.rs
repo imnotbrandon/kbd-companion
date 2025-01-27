@@ -7,7 +7,7 @@ mod steelseries;
 use crate::audio::AudioManager;
 use crate::gui::init_gui;
 use crate::hid_device_channel::{HidDeviceChannel, WriteError};
-use crate::steelseries::api::sonar::types::{VolumeInfo, VolumeSettings};
+use crate::steelseries::api::sonar::types::{ClassicRedirection, RedirectionId, VolumeInfo};
 use crate::steelseries::SteelSeriesEngineClient;
 use hid_device_channel::WriteResult;
 use hidapi::HidError;
@@ -376,13 +376,20 @@ pub(crate) enum SonarRequest {
     },
     FetchClassicRedirections,
     FetchDeviceVolume,
+    RedirectDevice {
+        redirection: RedirectionId,
+        device: String,
+    },
+    GetSonarUrl,
 }
 
 #[derive(Debug)]
 pub(crate) enum SonarResponse {
     FetchDevices(Vec<steelseries::api::sonar::types::AudioDevice>),
-    FetchClassicRedirections(Vec<steelseries::api::sonar::types::ClassicRedirection>),
+    FetchClassicRedirections(Vec<ClassicRedirection>),
     FetchDeviceVolume(VolumeInfo),
+    RedirectDevice(ClassicRedirection),
+    GetSonarUrl(String),
 }
 
 #[derive(Debug)]
@@ -435,6 +442,19 @@ async fn ss_comms(mut rx: UnboundedReceiver<Event>, gui_tx: Sender<Event>) {
                         .expect("idk vol")
                         .to_owned(),
                 )),
+                SonarRequest::RedirectDevice {
+                    device,
+                    redirection,
+                } => Some(SonarResponse::RedirectDevice(
+                    new_client
+                        .set_classic_redirection_device(redirection, &*device)
+                        .await
+                        .expect("redirectdevice")
+                        .to_owned(),
+                )),
+                SonarRequest::GetSonarUrl => {
+                    Some(SonarResponse::GetSonarUrl(new_client.baseurl.clone()))
+                }
             },
             _ => return,
         };

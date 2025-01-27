@@ -1,4 +1,6 @@
-use crate::steelseries::api::sonar::types::{AudioDevice, ClassicRedirection};
+use crate::steelseries::api::sonar::types::{
+    AudioDevice, ClassicRedirection, DeviceDataFlow, RedirectionId,
+};
 use std::fmt::Display;
 
 include!(concat!(env!("OUT_DIR"), "/codegen.rs"));
@@ -25,6 +27,19 @@ impl PartialEq<AudioDevice> for ClassicRedirection {
                 }
             }
             _ => false,
+        }
+    }
+}
+
+impl ClassicRedirection {
+    pub(crate) fn get_dataflow(&self) -> DeviceDataFlow {
+        if let Some(id) = self.id {
+            match id {
+                RedirectionId::Mic => DeviceDataFlow::Capture,
+                _ => DeviceDataFlow::Render,
+            }
+        } else {
+            unreachable!("Id should not be None")
         }
     }
 }
