@@ -7,6 +7,7 @@ mod steelseries;
 use crate::audio::AudioManager;
 use crate::gui::init_gui;
 use crate::hid_device_channel::{HidDeviceChannel, WriteError};
+use crate::steelseries::api::sonar::types::{VolumeInfo, VolumeSettings};
 use crate::steelseries::SteelSeriesEngineClient;
 use hid_device_channel::WriteResult;
 use hidapi::HidError;
@@ -374,12 +375,14 @@ pub(crate) enum SonarRequest {
         remove_steelseries_vad: Option<bool>,
     },
     FetchClassicRedirections,
+    FetchDeviceVolume,
 }
 
 #[derive(Debug)]
 pub(crate) enum SonarResponse {
     FetchDevices(Vec<steelseries::api::sonar::types::AudioDevice>),
     FetchClassicRedirections(Vec<steelseries::api::sonar::types::ClassicRedirection>),
+    FetchDeviceVolume(VolumeInfo),
 }
 
 #[derive(Debug)]
@@ -425,6 +428,13 @@ async fn ss_comms(mut rx: UnboundedReceiver<Event>, gui_tx: Sender<Event>) {
                             .to_owned(),
                     ))
                 }
+                SonarRequest::FetchDeviceVolume => Some(SonarResponse::FetchDeviceVolume(
+                    new_client
+                        .get_classic_volume_settings()
+                        .await
+                        .expect("idk vol")
+                        .to_owned(),
+                )),
             },
             _ => return,
         };
