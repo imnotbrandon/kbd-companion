@@ -5,7 +5,9 @@ use crate::{
 };
 use eframe::egui;
 use eframe::egui::ComboBox;
+use std::collections::hash_map::Values;
 use std::collections::HashMap;
+use std::iter::Filter;
 use tokio::sync::mpsc::error::SendError;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -18,8 +20,53 @@ struct ChannelState {
     device: String,
 }
 
+#[derive(Debug)]
+struct AudioDevices(HashMap<String, AudioDevice>);
+
+impl From<&Vec<AudioDevice>> for AudioDevices {
+    fn from(value: &Vec<AudioDevice>) -> Self {
+        Self(
+            value
+                .clone()
+                .into_iter()
+                .filter_map(|x| x.id.to_owned().and_then(|x1| Some((x1, x))))
+                .collect(),
+        )
+    }
+}
+
+impl AudioDevices {
+    pub fn new() -> Self {
+        AudioDevices(HashMap::new())
+    }
+
+    pub fn inner(&self) -> &HashMap<String, AudioDevice> {
+        &self.0
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &AudioDevice> {
+        self.0.values()
+    }
+
+    pub fn virtual_devices<'a>(
+        &'a self,
+    ) -> Filter<Values<'_, String, AudioDevice>, fn(&&'a AudioDevice) -> bool> {
+        self.0
+            .values()
+            .filter(|x| x.role.is_some_and(|x1| x1 != DeviceRole::None))
+    }
+    pub fn physical_devices<'a>(
+        &'a self,
+    ) -> Filter<Values<'_, String, AudioDevice>, fn(&&'a AudioDevice) -> bool> {
+        self.0
+            .values()
+            .filter(|x| x.role.is_some_and(|x1| x1 != DeviceRole::None))
+    }
+}
+
 pub(super) struct SonarView {
-    audio_devices: Vec<AudioDevice>,
+    audio_devices: AudioDevices,
+    virtual_audio_devices: Vec<AudioDevice>,
     redirections: Vec<ClassicRedirection>,
     channel_tx: UnboundedSender<Event>,
     vad_volume: HashMap<DeviceRole, RedirectionVolumes>,
@@ -29,13 +76,16 @@ pub(super) struct SonarView {
 impl SonarView {
     pub(crate) fn new(channel_tx: UnboundedSender<Event>) -> Self {
         Self {
-            audio_devices: Vec::new(),
+            audio_devices: AudioDevices::new(),
             redirections: Vec::new(),
             channel_tx,
             vad_volume: HashMap::new(),
             sonar_url: String::new(),
+            virtual_audio_devices: Vec::new(),
         }
     }
+
+    fn rebuild_state(&mut self) {}
 
     fn redirect_device(&mut self, redirection: &RedirectionId, device: &String) {
         self.sonar_request(SonarRequest::RedirectDevice {
@@ -59,9 +109,7 @@ impl SonarView {
 }
 impl View for SonarView {
     fn init(&mut self) {
-        self.sonar_request(SonarRequest::FetchDevices {
-            remove_steelseries_vad: Some(true),
-        });
+        self.sonar_request(SonarRequest::FetchDevices);
         self.sonar_request(SonarRequest::FetchClassicRedirections);
         self.fetch_volume().expect("Failed to fetch volume");
         self.sonar_request(SonarRequest::GetSonarUrl)
@@ -80,11 +128,16 @@ impl View for SonarView {
         self.redirections.iter_mut().for_each(|redirection| {
             ui.group(|ui| {
                 ui.vertical(|ui| {
-                    let device = device_list.iter().find(|x| redirection.eq(x));
-                    let device = if let Some(device) = device {
-                        device
-                    } else {
-                        return;
+                    let device = {
+                        let device_id = &redirection.device_id;
+                        if let Some(device_id) = device_id {
+                            match device_list.inner().get(device_id) {
+                                Some(device) => device,
+                                None => return,
+                            }
+                        } else {
+                            return;
+                        }
                     };
 
                     let device_name = if let Some(device_name) = &device.friendly_name {
@@ -92,6 +145,7 @@ impl View for SonarView {
                     } else {
                         return;
                     };
+
                     let redirection_dataflow = redirection.get_dataflow();
 
                     ui.heading(&redirection.to_string());
@@ -154,7 +208,7 @@ impl View for SonarView {
     fn process_event(&mut self, event: &Event) {
         match event {
             Event::SonarResponse(SonarResponse::FetchDevices(devices)) => {
-                self.audio_devices = devices.clone();
+                self.audio_devices = devices.into();
                 println!("Got sonar device list: {:?}", self.audio_devices);
             }
             Event::SonarResponse(SonarResponse::FetchClassicRedirections(redirections)) => {

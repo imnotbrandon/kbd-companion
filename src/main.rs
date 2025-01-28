@@ -371,9 +371,7 @@ impl Application<Connected> {
 
 #[derive(Debug)]
 pub(crate) enum SonarRequest {
-    FetchDevices {
-        remove_steelseries_vad: Option<bool>,
-    },
+    FetchDevices,
     FetchClassicRedirections,
     FetchDeviceVolume,
     RedirectDevice {
@@ -417,11 +415,9 @@ async fn ss_comms(mut rx: UnboundedReceiver<Event>, gui_tx: Sender<Event>) {
         println!("Got event: {event:?}");
         let response = match event {
             Some(Event::SonarRequest(request)) => match request {
-                SonarRequest::FetchDevices {
-                    remove_steelseries_vad,
-                } => Some(SonarResponse::FetchDevices(
+                SonarRequest::FetchDevices => Some(SonarResponse::FetchDevices(
                     new_client
-                        .list_audio_devices(None, None, remove_steelseries_vad)
+                        .list_audio_devices(None, None, None)
                         .await
                         .expect("idk")
                         .to_owned(),
